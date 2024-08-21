@@ -94,7 +94,7 @@ def demix_track(config, model, mix, device, pbar=False):
     # windowingArray crossfades at segment boundaries to mitigate clicking artifacts
     windowingArray = _getWindowingArray(C, fade_size)
 
-    with torch.cuda.amp.autocast(enabled=config.training.use_amp):
+    with torch.autocast("cuda", dtype=torch.bfloat16):
         with torch.inference_mode():
             if config.training.target_instrument is not None:
                 req_shape = (1, ) + tuple(mix.shape)

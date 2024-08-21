@@ -10,8 +10,8 @@ import os
 import glob
 import torch
 import numpy as np
-import soundfile as sf
 import torch.nn as nn
+from pydub import AudioSegment
 
 # Using the embedded version of Python can also correctly import the utils module.
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -25,7 +25,10 @@ warnings.filterwarnings("ignore")
 def run_folder(model, args, config, device, verbose=False):
     start_time = time.time()
     model.eval()
-    all_mixtures_path = glob.glob(args.input_folder + '/*.*')
+    all_mixtures_path = [
+        path for path in glob.glob(args.input_folder + '/*.*')
+        if not os.path.exists(os.path.join(args.store_dir, f"{os.path.basename(os.path.splitext(path)[0])}_piano.mp3"))
+    ]
     all_mixtures_path.sort()
     print('Total files found: {}'.format(len(all_mixtures_path)))
 
@@ -80,13 +83,13 @@ def run_folder(model, args, config, device, verbose=False):
                 if config.inference['normalize'] is True:
                     estimates = estimates * std + mean
             file_name, _ = os.path.splitext(os.path.basename(path))
-            output_file = os.path.join(args.store_dir, f"{file_name}_{instr}.wav")
-            sf.write(output_file, estimates, sr, subtype = 'FLOAT')
+            output_file = os.path.join(args.store_dir, f"{file_name}_{instr}.mp3")
+            write_mp3(output_file, (estimates * 32767).astype(np.int16), sr)
 
         # Output "instrumental", which is an inverse of 'vocals' (or first stem in list if 'vocals' absent)
         if args.extract_instrumental:
             file_name, _ = os.path.splitext(os.path.basename(path))
-            instrum_file_name = os.path.join(args.store_dir, f"{file_name}_instrumental.wav")
+            instrum_file_name = os.path.join(args.store_dir, f"{file_name}_instrumental.mp3")
             if 'vocals' in instruments:
                 estimates = res['vocals'].T
             else:
@@ -94,11 +97,19 @@ def run_folder(model, args, config, device, verbose=False):
             if 'normalize' in config.inference:
                 if config.inference['normalize'] is True:
                     estimates = estimates * std + mean
-            sf.write(instrum_file_name, mix_orig.T - estimates, sr, subtype = 'FLOAT')
+            write_mp3(instrum_file_name, ((mix_orig.T - estimates) * 32767).astype(np.int16), sr)
 
     time.sleep(1)
     print("Elapsed time: {:.2f} sec".format(time.time() - start_time))
 
+def write_mp3(file_path, audio_data, sample_rate):
+    audio_segment = AudioSegment(
+        audio_data.tobytes(),
+        frame_rate=sample_rate,
+        sample_width=audio_data.dtype.itemsize,
+        channels=2
+    )
+    audio_segment.export(file_path, format="mp3", bitrate="96k")
 
 def proc_folder(args):
     parser = argparse.ArgumentParser()
@@ -107,7 +118,7 @@ def proc_folder(args):
     parser.add_argument("--config_path", type=str, help="path to config file")
     parser.add_argument("--start_check_point", type=str, default='', help="Initial checkpoint to valid weights")
     parser.add_argument("--input_folder", type=str, help="folder with mixtures to process")
-    parser.add_argument("--store_dir", default="", type=str, help="path to store results as wav file")
+    parser.add_argument("--store_dir", default="", type=str, help="path to store results as mp3 file")
     parser.add_argument("--device_ids", nargs='+', type=int, default=0, help='list of gpu ids')
     parser.add_argument("--extract_instrumental", action='store_true', help="invert vocals to get instrumental if provided")
     parser.add_argument("--disable_detailed_pbar", action='store_true', help="disable detailed progress bar")
