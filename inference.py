@@ -11,6 +11,7 @@ import glob
 import torch
 import numpy as np
 import torch.nn as nn
+from concurrent.futures import ThreadPoolExecutor
 from pydub import AudioSegment
 
 # Using the embedded version of Python can also correctly import the utils module.
@@ -47,57 +48,62 @@ def run_folder(model, args, config, device, verbose=False):
     else:
         detailed_pbar = True
 
-    for path in all_mixtures_path:
-        print("Starting processing track: ", path)
-        if not verbose:
-            all_mixtures_path.set_postfix({'track': os.path.basename(path)})
-        try:
-            # mix, sr = sf.read(path)
-            mix, sr = librosa.load(path, sr=44100, mono=False)
-        except Exception as e:
-            print('Can read track: {}'.format(path))
-            print('Error message: {}'.format(str(e)))
-            continue
+    # Create a ThreadPoolExecutor for MP3 writing
+    with ThreadPoolExecutor() as executor:
+        for path in all_mixtures_path:
+            print("Starting processing track: ", path)
+            if not verbose:
+                all_mixtures_path.set_postfix({'track': os.path.basename(path)})
+            try:
+                mix, sr = librosa.load(path, sr=44100, mono=False)
+            except Exception as e:
+                print('Can read track: {}'.format(path))
+                print('Error message: {}'.format(str(e)))
+                continue
 
-        # Convert mono to stereo if needed
-        if len(mix.shape) == 1:
-            mix = np.stack([mix, mix], axis=0)
+            # Convert mono to stereo if needed
+            if len(mix.shape) == 1:
+                mix = np.stack([mix, mix], axis=0)
 
-        mix_orig = mix.copy()
-        if 'normalize' in config.inference:
-            if config.inference['normalize'] is True:
-                mono = mix.mean(0)
-                mean = mono.mean()
-                std = mono.std()
-                mix = (mix - mean) / std
-
-        mixture = torch.tensor(mix, dtype=torch.float32)
-        if args.model_type == 'htdemucs':
-            res = demix_track_demucs(config, model, mixture, device, pbar=detailed_pbar)
-        else:
-            res = demix_track(config, model, mixture, device, pbar=detailed_pbar)
-
-        for instr in instruments:
-            estimates = res[instr].T
+            mix_orig = mix.copy()
             if 'normalize' in config.inference:
                 if config.inference['normalize'] is True:
-                    estimates = estimates * std + mean
-            file_name, _ = os.path.splitext(os.path.basename(path))
-            output_file = os.path.join(args.store_dir, f"{file_name}_{instr}.mp3")
-            write_mp3(output_file, (estimates * 32767).astype(np.int16), sr)
+                    mono = mix.mean(0)
+                    mean = mono.mean()
+                    std = mono.std()
+                    mix = (mix - mean) / std
 
-        # Output "instrumental", which is an inverse of 'vocals' (or first stem in list if 'vocals' absent)
-        if args.extract_instrumental:
-            file_name, _ = os.path.splitext(os.path.basename(path))
-            instrum_file_name = os.path.join(args.store_dir, f"{file_name}_instrumental.mp3")
-            if 'vocals' in instruments:
-                estimates = res['vocals'].T
+            mixture = torch.tensor(mix, dtype=torch.float32)
+            if args.model_type == 'htdemucs':
+                res = demix_track_demucs(config, model, mixture, device, pbar=detailed_pbar)
             else:
-                estimates = res[instruments[0]].T
-            if 'normalize' in config.inference:
-                if config.inference['normalize'] is True:
-                    estimates = estimates * std + mean
-            write_mp3(instrum_file_name, ((mix_orig.T - estimates) * 32767).astype(np.int16), sr)
+                res = demix_track(config, model, mixture, device, pbar=detailed_pbar)
+
+            for instr in instruments:
+                estimates = res[instr].T
+                if 'normalize' in config.inference:
+                    if config.inference['normalize'] is True:
+                        estimates = estimates * std + mean
+                file_name, _ = os.path.splitext(os.path.basename(path))
+                output_file = os.path.join(args.store_dir, f"{file_name}_{instr}.mp3")
+                # Submit MP3 writing task to the executor
+                executor.submit(write_mp3, output_file, (estimates * 32767).astype(np.int16), sr)
+
+            # Output "instrumental", which is an inverse of 'vocals' (or first stem in list if 'vocals' absent)
+            if args.extract_instrumental:
+                file_name, _ = os.path.splitext(os.path.basename(path))
+                instrum_file_name = os.path.join(args.store_dir, f"{file_name}_instrumental.mp3")
+                if 'vocals' in instruments:
+                    estimates = res['vocals'].T
+                else:
+                    estimates = res[instruments[0]].T
+                if 'normalize' in config.inference:
+                    if config.inference['normalize'] is True:
+                        estimates = estimates * std + mean
+                # Submit instrumental MP3 writing task to the executor
+                executor.submit(write_mp3, instrum_file_name, ((mix_orig.T - estimates) * 32767).astype(np.int16), sr)
+
+        # No need to wait for MP3 writing tasks to complete
 
     time.sleep(1)
     print("Elapsed time: {:.2f} sec".format(time.time() - start_time))
